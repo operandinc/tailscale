@@ -88,6 +88,10 @@ type Server struct {
 	// If empty, the Tailscale default is used.
 	ControlURL string
 
+	// NotifyFunc is an optional callback function for engine updates
+	// from the LocalBackend.
+	NotifyFunc func(*ipn.Notify) (keepGoing bool)
+
 	initOnce         sync.Once
 	initErr          error
 	lb               *ipnlocal.LocalBackend
@@ -267,7 +271,10 @@ func (s *Server) start() (reterr error) {
 	}
 	logid := lpc.PublicID.String()
 
-	s.logbuffer, err = filch.New(filepath.Join(s.rootPath, "tailscaled"), filch.Options{ReplaceStderr: false})
+	s.logbuffer, err = filch.New(
+		filepath.Join(s.rootPath, "tailscaled"),
+		filch.Options{ReplaceStderr: false},
+	)
 	if err != nil {
 		return fmt.Errorf("error creating filch: %w", err)
 	}
@@ -342,6 +349,11 @@ func (s *Server) start() (reterr error) {
 	lb, err := ipnlocal.NewLocalBackend(logf, logid, s.Store, "", s.dialer, eng, loginFlags)
 	if err != nil {
 		return fmt.Errorf("NewLocalBackend: %v", err)
+	}
+	if s.NotifyFunc != nil {
+		notifCtx, cancel := context.WithCancel(context.Background())
+		closePool.addFunc(cancel)
+		go lb.WatchNotifications(notifCtx, ipn.NotifyWatchEngineUpdates, nil, s.NotifyFunc)
 	}
 	lb.SetVarRoot(s.rootPath)
 	logf("tsnet starting with hostname %q, varRoot %q", s.hostname, s.rootPath)
@@ -430,7 +442,10 @@ func (s *Server) printAuthURLLoop() {
 		}
 		st := s.lb.StatusWithoutPeers()
 		if st.AuthURL != "" {
-			s.logf("To start this tsnet server, restart with TS_AUTHKEY set, or go to: %s", st.AuthURL)
+			s.logf(
+				"To start this tsnet server, restart with TS_AUTHKEY set, or go to: %s",
+				st.AuthURL,
+			)
 		}
 		select {
 		case <-time.After(5 * time.Second):
@@ -478,7 +493,11 @@ func getTSNetDir(logf logger.Logf, confDir, prog string) (string, error) {
 		return "", err
 	}
 	if !fi.IsDir() {
-		return "", fmt.Errorf("expected old tslib path %q to be a directory; got %v", oldPath, fi.Mode())
+		return "", fmt.Errorf(
+			"expected old tslib path %q to be a directory; got %v",
+			oldPath,
+			fi.Mode(),
+		)
 	}
 
 	// At this point, oldPath exists and is a directory. But does
